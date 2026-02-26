@@ -1,67 +1,16 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
+import { createClient } from "@supabase/supabase-js";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("cvintel.db");
-
-// Initialize Database & Migrations
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    email TEXT UNIQUE,
-    full_name TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS cvs (
-    id TEXT PRIMARY KEY,
-    user_id TEXT,
-    parsed_text TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS cv_scores (
-    id TEXT PRIMARY KEY,
-    cv_id TEXT,
-    structure_score INTEGER,
-    keyword_score INTEGER,
-    impact_score INTEGER,
-    alignment_score INTEGER,
-    clarity_score INTEGER,
-    overall_score INTEGER,
-    ats_risk_level TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(cv_id) REFERENCES cvs(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS cv_reports (
-    id TEXT PRIMARY KEY,
-    cv_id TEXT,
-    strengths TEXT, -- JSON
-    weaknesses TEXT, -- JSON
-    ats_risk_explanation TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(cv_id) REFERENCES cvs(id)
-  );
-`);
-
-// Simple Migration Logic for Users Table
-const tableInfo = db.prepare("PRAGMA table_info(users)").all() as any[];
-const columns = tableInfo.map(c => c.name);
-const requiredColumns = ['target_role', 'industry', 'career_level', 'target_country'];
-
-requiredColumns.forEach(col => {
-  if (!columns.includes(col)) {
-    console.log(`Migrating: Adding column ${col} to users table`);
-    db.prepare(`ALTER TABLE users ADD COLUMN ${col} TEXT`).run();
-  }
-});
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function startServer() {
   const app = express();
@@ -74,87 +23,135 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
-  // Check if user exists for auto-fill
-  app.get("/api/auth/check/:email", (req, res) => {
+  // Keep-Alive Endpoint to prevent Supabase from pausing
+  app.get("/api/keep-alive", async (req, res) => {
     try {
-      const user = db.prepare("SELECT * FROM users WHERE email = ?").get(req.params.email);
-      res.json(user || null);
+      // Perform a simple query to keep the connection active
+      // We use head: true to minimize data transfer
+      const { error } = await supabase.from('users').select('*', { count: 'exact', head: true }).limit(1);
+      if (error) throw error;
+      res.json({ status: "alive", timestamp: new Date().toISOString() });
+    } catch (error: any) {
+      console.error("Keep-alive failed:", error.message);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Check if user exists for auto-fill
+  app.get("/api/auth/check/:email", async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', req.params.email)
+        .maybeSingle();
+      
+      if (error) throw error;
+      res.json(data || null);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Mock Auth for V1 - Enhanced for Lead Capture
-  app.post("/api/auth/mock", (req, res) => {
+  app.post("/api/auth/mock", async (req, res) => {
     try {
       const { email, full_name, target_role, industry, career_level, target_country } = req.body;
-      let user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
       
-      if (!user) {
-        const id = Math.random().toString(36).substring(7);
-        db.prepare(`
-          INSERT INTO users (id, email, full_name, target_role, industry, career_level, target_country) 
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(id, email, full_name, target_role, industry, career_level, target_country);
-        user = { id, email, full_name, target_role, industry, career_level, target_country };
+      // Check if user exists
+      const { data: existingUser, error: fetchError } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', email)
+        .maybeSingle();
+
+      if (fetchError) throw fetchError;
+
+      if (!existingUser) {
+        // Insert new user
+        const { data: newUser, error: insertError } = await supabase
+          .from('users')
+          .insert([{ 
+            email, 
+            full_name, 
+            target_role, 
+            industry, 
+            career_level, 
+            target_country 
+          }])
+          .select()
+          .single();
+        
+        if (insertError) throw insertError;
+        res.json(newUser);
       } else {
-        // Update existing user profile with latest target info
-        db.prepare(`
-          UPDATE users 
-          SET full_name = ?, target_role = ?, industry = ?, career_level = ?, target_country = ?
-          WHERE id = ?
-        `).run(full_name, target_role, industry, career_level, target_country, user.id);
+        // Update existing user
+        const { data: updatedUser, error: updateError } = await supabase
+          .from('users')
+          .update({ 
+            full_name, 
+            target_role, 
+            industry, 
+            career_level, 
+            target_country 
+          })
+          .eq('id', existingUser.id)
+          .select()
+          .single();
+        
+        if (updateError) throw updateError;
+        res.json(updatedUser);
       }
-      res.json(user);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Save Analysis Results
-  app.post("/api/analysis/save", (req, res) => {
+  app.post("/api/analysis/save", async (req, res) => {
     try {
       const { userId, parsedCv, scores, report } = req.body;
-      const cvId = Math.random().toString(36).substring(7);
-      const scoreId = Math.random().toString(36).substring(7);
-      const reportId = Math.random().toString(36).substring(7);
 
-      db.transaction(() => {
-        db.prepare("INSERT INTO cvs (id, user_id, parsed_text) VALUES (?, ?, ?)").run(
-          cvId,
-          userId,
-          JSON.stringify(parsedCv)
-        );
+      // 1. Save CV
+      const { data: cvData, error: cvError } = await supabase
+        .from('cvs')
+        .insert([{ 
+          user_id: userId, 
+          parsed_text: JSON.stringify(parsedCv) 
+        }])
+        .select()
+        .single();
+      
+      if (cvError) throw cvError;
+      const cvId = cvData.id;
 
-        db.prepare(`
-          INSERT INTO cv_scores (
-            id, cv_id, structure_score, keyword_score, impact_score, 
-            alignment_score, clarity_score, overall_score, ats_risk_level
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          scoreId,
-          cvId,
-          scores.structure,
-          scores.keyword,
-          scores.impact,
-          scores.alignment,
-          scores.clarity,
-          scores.overall,
-          scores.atsRisk
-        );
+      // 2. Save Scores
+      const { error: scoreError } = await supabase
+        .from('cv_scores')
+        .insert([{
+          cv_id: cvId,
+          structure_score: scores.structure,
+          keyword_score: scores.keyword,
+          impact_score: scores.impact,
+          alignment_score: scores.alignment,
+          clarity_score: scores.clarity,
+          overall_score: scores.overall,
+          ats_risk_level: scores.atsRisk
+        }]);
+      
+      if (scoreError) throw scoreError;
 
-        db.prepare(`
-          INSERT INTO cv_reports (
-            id, cv_id, strengths, weaknesses, ats_risk_explanation
-          ) VALUES (?, ?, ?, ?, ?)
-        `).run(
-          reportId,
-          cvId,
-          JSON.stringify(report.strengths),
-          JSON.stringify(report.weaknesses),
-          report.ats_risk_explanation
-        );
-      })();
+      // 3. Save Report
+      const { error: reportError } = await supabase
+        .from('cv_reports')
+        .insert([{
+          cv_id: cvId,
+          strengths: JSON.stringify(report.strengths),
+          weaknesses: JSON.stringify(report.weaknesses),
+          ats_risk_explanation: report.ats_risk_explanation
+        }]);
+      
+      if (reportError) throw reportError;
 
       res.json({ success: true, cvId });
     } catch (error: any) {
@@ -162,23 +159,34 @@ async function startServer() {
     }
   });
 
-  app.get("/api/history/:userId", (req, res) => {
+  app.get("/api/history/:userId", async (req, res) => {
     try {
-      const history = db.prepare(`
-        SELECT s.*, r.strengths, r.weaknesses, r.ats_risk_explanation
-        FROM cv_scores s
-        JOIN cv_reports r ON s.cv_id = r.cv_id
-        JOIN cvs c ON s.cv_id = c.id
-        WHERE c.user_id = ?
-        ORDER BY s.created_at DESC
-      `).all(req.params.userId);
+      const { data, error } = await supabase
+        .from('cv_scores')
+        .select(`
+          *,
+          cv_reports (strengths, weaknesses, ats_risk_explanation),
+          cvs!inner (user_id)
+        `)
+        .eq('cvs.user_id', req.params.userId)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      
+      const history = data.map((item: any) => ({
+        ...item,
+        strengths: item.cv_reports?.[0]?.strengths ? JSON.parse(item.cv_reports[0].strengths) : [],
+        weaknesses: item.cv_reports?.[0]?.weaknesses ? JSON.parse(item.cv_reports[0].weaknesses) : [],
+        ats_risk_explanation: item.cv_reports?.[0]?.ats_risk_explanation
+      }));
+
       res.json(history);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  // Global Error Handler to prevent HTML responses for API errors
+  // Global Error Handler
   app.use((err: any, req: any, res: any, next: any) => {
     console.error(err.stack);
     res.status(500).json({ error: "Internal Server Error", details: err.message });
