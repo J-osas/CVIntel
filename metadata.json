@@ -1,0 +1,5 @@
+{
+  "name": "CVIntel",
+  "description": "AI-powered CV analysis tool that shows you what recruiters see using modular, deterministic scoring and diagnostic explanations.",
+  "requestFramePermissions": []
+}
