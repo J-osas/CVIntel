@@ -7,10 +7,20 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize Supabase Client
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "";
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Initialize Supabase Client Lazily
+let supabaseClient: any = null;
+function getSupabase() {
+  if (!supabaseClient) {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+    
+    if (!supabaseUrl || !supabaseKey) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_KEY environment variables.");
+    }
+    supabaseClient = createClient(supabaseUrl, supabaseKey);
+  }
+  return supabaseClient;
+}
 
 async function startServer() {
   const app = express();
@@ -20,14 +30,13 @@ async function startServer() {
 
   // API Routes
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({ status: "ok", supabaseConfigured: !!(process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)) });
   });
 
   // Keep-Alive Endpoint to prevent Supabase from pausing
   app.get("/api/keep-alive", async (req, res) => {
     try {
-      // Perform a simple query to keep the connection active
-      // We use head: true to minimize data transfer
+      const supabase = getSupabase();
       const { error } = await supabase.from('users').select('*', { count: 'exact', head: true }).limit(1);
       if (error) throw error;
       res.json({ status: "alive", timestamp: new Date().toISOString() });
@@ -40,6 +49,7 @@ async function startServer() {
   // Check if user exists for auto-fill
   app.get("/api/auth/check/:email", async (req, res) => {
     try {
+      const supabase = getSupabase();
       const { data, error } = await supabase
         .from('users')
         .select('*')
@@ -56,6 +66,7 @@ async function startServer() {
   // Mock Auth for V1 - Enhanced for Lead Capture
   app.post("/api/auth/mock", async (req, res) => {
     try {
+      const supabase = getSupabase();
       const { email, full_name, target_role, industry, career_level, target_country } = req.body;
       
       // Check if user exists
@@ -110,6 +121,7 @@ async function startServer() {
   // Save Analysis Results
   app.post("/api/analysis/save", async (req, res) => {
     try {
+      const supabase = getSupabase();
       const { userId, parsedCv, scores, report } = req.body;
 
       // 1. Save CV
@@ -161,6 +173,7 @@ async function startServer() {
 
   app.get("/api/history/:userId", async (req, res) => {
     try {
+      const supabase = getSupabase();
       const { data, error } = await supabase
         .from('cv_scores')
         .select(`
