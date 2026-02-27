@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Upload, 
   ShieldCheck, 
@@ -59,24 +59,31 @@ export default function App() {
   const [isReturningUser, setIsReturningUser] = useState(false);
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('cvintel_user');
-    if (savedUser) {
-      const u = JSON.parse(savedUser);
-      setUser(u);
-      // Pre-fill context if user is already logged in
-      if (u.email) {
-        const [first, ...last] = (u.full_name || '').split(' ');
-        setContext(prev => ({
-          ...prev,
-          email: u.email,
-          firstName: first || '',
-          lastName: last.join(' ') || '',
-          targetRole: u.target_role || '',
-          industry: u.industry || '',
-          careerLevel: u.career_level || 'Mid-level',
-          targetCountry: u.target_country || ''
-        }));
+    try {
+      const savedUser = localStorage.getItem('cvintel_user');
+      if (savedUser && savedUser !== 'undefined' && savedUser !== 'null') {
+        const u = JSON.parse(savedUser);
+        if (u && typeof u === 'object') {
+          setUser(u);
+          // Pre-fill context if user is already logged in
+          if (u.email) {
+            const [first, ...last] = (u.full_name || '').split(' ');
+            setContext(prev => ({
+              ...prev,
+              email: u.email,
+              firstName: first || '',
+              lastName: last.join(' ') || '',
+              targetRole: u.target_role || '',
+              industry: u.industry || '',
+              careerLevel: u.career_level || 'Mid-level',
+              targetCountry: u.target_country || ''
+            }));
+          }
+        }
       }
+    } catch (e) {
+      console.error("Failed to parse saved user:", e);
+      localStorage.removeItem('cvintel_user');
     }
   }, []);
 

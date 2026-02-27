@@ -1,6 +1,17 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+// Initialize Gemini Client Lazily to prevent browser crashes if key is missing
+let aiClient: any = null;
+function getAI() {
+  if (!aiClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is not configured. Please set it in your environment variables.");
+    }
+    aiClient = new GoogleGenAI({ apiKey });
+  }
+  return aiClient;
+}
 
 export interface ParsedCV {
   professional_summary: string;
@@ -17,6 +28,7 @@ export interface ParsedCV {
 }
 
 export async function parseCV(cvText: string): Promise<ParsedCV> {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: `Extract and structure the following CV into JSON with these fields:
@@ -69,6 +81,7 @@ export interface Signals {
 }
 
 export async function detectSignals(parsedCv: ParsedCV, context: { targetRole: string, industry: string, targetCountry: string, careerLevel: string }): Promise<Signals> {
+  const ai = getAI();
   const [structure, keywords, impact, alignment, clarity] = await Promise.all([
     // 2A: Structure & Formatting Signal Prompt
     ai.models.generateContent({
@@ -222,6 +235,7 @@ ${JSON.stringify(parsedCv)}`,
 }
 
 export async function explainScores(scores: any, signals: Signals): Promise<any> {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: `Explain the following CV scores in simple, recruiter-friendly language.
@@ -255,6 +269,7 @@ Provide:
 }
 
 export async function optimizeSummary(originalSummary: string, context: { targetRole: string, industry: string, targetCountry: string, careerLevel: string }): Promise<string> {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: `Rewrite the professional summary for:
@@ -281,6 +296,7 @@ Requirements:
 }
 
 export async function optimizeBullets(bullets: string[], targetRole: string): Promise<string[]> {
+  const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
     contents: `Rewrite the following experience bullets to emphasize:
