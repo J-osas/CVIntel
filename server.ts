@@ -1,11 +1,25 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
+import { GoogleGenAI, Type } from "@google/genai";
 import path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Initialize Gemini Client Lazily
+let aiClient: any = null;
+function getAI() {
+  if (!aiClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is not configured in Vercel/Environment.");
+    }
+    aiClient = new GoogleGenAI({ apiKey });
+  }
+  return aiClient;
+}
 
 // Initialize Supabase Client Lazily
 let supabaseClient: any = null;
@@ -194,6 +208,83 @@ async function startServer() {
       }));
 
       res.json(history);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- NEW AI ANALYSIS ENDPOINTS (Server-Side) ---
+
+  app.post("/api/ai/analyze", async (req, res) => {
+    try {
+      const { cvText, context } = req.body;
+      const ai = getAI();
+
+      // 1. Parse CV
+      const parseResponse = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Extract and structure the following CV into JSON:
+        CV TEXT: ${cvText}`,
+        config: {
+          systemInstruction: "You are an expert CV parser. Extract professional_summary, work_experience (title, company, dates, bullet_points), education, skills, certifications, tools_and_technologies.",
+          responseMimeType: "application/json"
+        }
+      });
+      const parsedCv = JSON.parse(parseResponse.text || "{}");
+
+      // 2. Detect Signals
+      const signalsResponse = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Analyze this CV for ${context.targetRole} in ${context.industry}.
+        CV: ${JSON.stringify(parsedCv)}`,
+        config: {
+          systemInstruction: "Detect hiring signals: structure, keywords, impact, alignment, clarity. Return JSON.",
+          responseMimeType: "application/json"
+        }
+      });
+      const signals = JSON.parse(signalsResponse.text || "{}");
+
+      // 3. Generate Report
+      const reportResponse = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Explain scores for these signals: ${JSON.stringify(signals)}`,
+        config: {
+          systemInstruction: "Provide 3 strengths, 3 weaknesses, and ATS risk explanation in JSON.",
+          responseMimeType: "application/json"
+        }
+      });
+      const report = JSON.parse(reportResponse.text || "{}");
+
+      res.json({ parsedCv, signals, report });
+    } catch (error: any) {
+      console.error("AI Analysis Error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/ai/optimize", async (req, res) => {
+    try {
+      const { type, content, context } = req.body;
+      const ai = getAI();
+
+      let prompt = "";
+      if (type === 'summary') {
+        prompt = `Rewrite this summary for ${context.targetRole}: ${content}`;
+      } else {
+        prompt = `Rewrite these bullets for ${context.targetRole}: ${JSON.stringify(content)}`;
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: {
+          systemInstruction: "You are a senior CV writer. Rewrite for high impact and ATS friendliness.",
+          responseMimeType: type === 'bullets' ? "application/json" : "text/plain"
+        }
+      });
+
+      const result = type === 'bullets' ? JSON.parse(response.text || "[]") : response.text;
+      res.json({ result });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

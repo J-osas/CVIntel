@@ -13,7 +13,28 @@ import {
   History,
   ArrowRight
 } from 'lucide-react';
-import { parseCV, detectSignals, explainScores, optimizeSummary, optimizeBullets, ParsedCV, Signals } from './services/geminiService';
+
+export interface ParsedCV {
+  professional_summary: string;
+  work_experience: Array<{
+    title: string;
+    company: string;
+    dates: string;
+    bullet_points: string[];
+  }>;
+  education: string;
+  skills: string[];
+  certifications: string[];
+  tools_and_technologies: string[];
+}
+
+export interface Signals {
+  structure: any;
+  keywords: any;
+  impact: any;
+  alignment: any;
+  clarity: any;
+}
 
 interface ScoreData {
   structure: number;
@@ -126,6 +147,7 @@ export default function App() {
       })
     });
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Authentication failed');
     setUser(data);
     localStorage.setItem('cvintel_user', JSON.stringify(data));
     return data;
@@ -174,33 +196,41 @@ export default function App() {
       setLoadingStep('Capturing lead profile...');
       const currentUser = await handleAuth(context);
       
-      setLoadingStep('Parsing CV structure...');
-      const parsed = await parseCV(cvText);
+      setLoadingStep('Running AI analysis (this may take a moment)...');
+      const res = await fetch('/api/ai/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cvText, context })
+      });
       
-      setLoadingStep('Detecting hiring signals...');
-      const signals = await detectSignals(parsed, context);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'AI Analysis failed');
+
+      const { parsedCv, signals, report } = data;
       
       setLoadingStep('Calculating recruiter-grade scores...');
       const scores = calculateScores(signals);
       
-      setLoadingStep('Generating diagnostic report...');
-      const report = await explainScores(scores, signals);
-
-      const result = { parsedCv: parsed, scores, report };
+      const result = { parsedCv, scores, report };
       setAnalysisResult(result);
 
-      if (user) {
-        await fetch('/api/analysis/save', {
+      if (currentUser) {
+        const saveRes = await fetch('/api/analysis/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: user.id, ...result })
+          body: JSON.stringify({ userId: currentUser.id, ...result })
         });
+        if (!saveRes.ok) {
+          const saveData = await saveRes.json();
+          console.error("Failed to save analysis:", saveData.error);
+        }
       }
 
       setView('report');
-    } catch (error) {
-      console.error(error);
-      alert('Analysis failed. Please try again.');
+    } catch (error: any) {
+      console.error("Analysis Error:", error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      alert(`Analysis failed: ${errorMessage}. Check your browser console or Vercel logs for details.`);
       setView('landing');
     }
   };
@@ -209,16 +239,28 @@ export default function App() {
     if (!analysisResult) return;
     setIsOptimizing(true);
     try {
-      const summary = await optimizeSummary(analysisResult.parsedCv.professional_summary, context);
-      
-      const experience = await Promise.all(
-        analysisResult.parsedCv.work_experience.map(async (job) => ({
-          title: job.title,
-          bullets: await optimizeBullets(job.bullet_points, context.targetRole)
-        }))
-      );
+      // Optimize Summary
+      const summaryRes = await fetch('/api/ai/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'summary', content: analysisResult.parsedCv.professional_summary, context })
+      });
+      const summaryData = await summaryRes.json();
+      if (!summaryRes.ok) throw new Error(summaryData.error);
 
-      setOptimizedCv({ summary, experience });
+      // Optimize Experience
+      const experienceRes = await fetch('/api/ai/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'experience', content: analysisResult.parsedCv.work_experience, context })
+      });
+      const experienceData = await experienceRes.json();
+      if (!experienceRes.ok) throw new Error(experienceData.error);
+
+      setOptimizedCv({ 
+        summary: summaryData.result, 
+        experience: experienceData.result 
+      });
     } catch (error) {
       console.error(error);
       alert('Optimization failed.');
